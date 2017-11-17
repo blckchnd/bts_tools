@@ -594,7 +594,7 @@ class Btc38FeedProvider(FeedProvider):
 
 class AexFeedProvider(FeedProvider):
     NAME = 'Aex'
-    AVAILABLE_MARKETS = [('BTS', 'BTC'), ('BTS', 'CNY'), ('BTC', 'CNY')]
+    AVAILABLE_MARKETS = [('BTS', 'BTC')]
 
     @check_online_status
     @reuse_last_value_on_fail
