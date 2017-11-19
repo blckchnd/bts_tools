@@ -18,7 +18,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 from os.path import join, dirname, expanduser, exists, abspath
-from collections import namedtuple, defaultdict
+from collections import namedtuple, defaultdict, abc
 from subprocess import Popen, PIPE
 from functools import wraps
 from jinja2 import Environment, PackageLoader
@@ -96,10 +96,11 @@ def profile(f):
             stop_time = time.time()
             plog.debug('Function %s(%s): returned in %0.3f ms' % (f.__name__, args_str, (stop_time-start_time)*1000))
             return result
-        except Exception:
+        except Exception as e:
             stop_time = time.time()
             plog.debug('Function %s(%s): exception in %0.3f ms' % (f.__name__, args_str, (stop_time-start_time)*1000))
-            raise
+            plog.exception(e)
+            raise e
     return wrapper
 
 
@@ -236,14 +237,14 @@ def load_config(loglevels=None):
 
 
     # check whether config.yaml has a correct format
-    m = config['monitoring']
-    if (m['feeds'].get('publish_time_interval') is None and
-        m['feeds'].get('publish_time_slot') is None):
+    m = config['monitoring']['feeds']
+    if (m['bts'].get('publish_time_interval') is None and
+        m['bts'].get('publish_time_slot') is None):
         log.warning('Will not be able to publish feeds. You need to specify '
                     'either publish_time_interval or publish_time_slot')
 
-    check_time_interval = m['feeds']['check_time_interval']
-    publish_time_interval = m['feeds'].get('publish_time_interval')
+    check_time_interval = m['check_time_interval']
+    publish_time_interval = m['bts'].get('publish_time_interval')
     if publish_time_interval:
         if publish_time_interval < check_time_interval:
             log.error('Feed publish time interval ({}) is smaller than check time interval ({})'.format(publish_time_interval, check_time_interval))
@@ -289,15 +290,19 @@ def load_config(loglevels=None):
 
 
 DEFAULT_BIN_FILENAMES = {'bts': ['witness_node/witness_node', 'cli_wallet/cli_wallet'],
+                         'bts-testnet': ['witness_node/witness_node', 'cli_wallet/cli_wallet'],
                          'muse': ['mused/mused', 'cli_wallet/cli_wallet'],
                          'steem': ['steemd/steemd', 'cli_wallet/cli_wallet'],
-                         'ppy': ['witness_node/witness_node', 'cli_wallet/cli_wallet']
+                         'ppy': ['witness_node/witness_node', 'cli_wallet/cli_wallet'],
+                         'ppy-testnet': ['witness_node/witness_node', 'cli_wallet/cli_wallet']
                          }
 
 DEFAULT_GUI_BIN_FILENAMES = {'bts': '',
+                             'bts-testnet': '',
                              'muse': '',
                              'steem': '',
-                             'ppy': ''
+                             'ppy': '',
+                             'ppy-testnet': ''
                              }
 
 
@@ -528,6 +533,22 @@ class hashabledict(dict):
 
     def __eq__(self, other):
         return self.__key() == other.__key()
+
+
+def make_hashable(obj):
+    if isinstance(obj, abc.MutableSequence):
+        return tuple(make_hashable(x) for x in obj)
+    elif isinstance(obj, abc.MutableMapping):
+        return tuple((k, make_hashable(v)) for k, v in sorted(obj.items()))
+    elif isinstance(obj, abc.MutableSet):
+        return frozenset(make_hashable(x) for x in obj)
+    else:
+        try:
+            hash(obj)
+        except TypeError:
+            raise TypeError('make_hashable() doesn\'t know how to deal with obj type: {}, for obj {}'.format(type(obj), obj))
+
+        return obj
 
 
 def to_list(obj):

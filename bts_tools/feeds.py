@@ -20,11 +20,12 @@
 
 from . import core
 from .core import hashabledict
-from .feed_providers import FeedPrice, FeedSet, YahooFeedProvider, BterFeedProvider, Btc38FeedProvider, \
-    AexFeedProvider, PoloniexFeedProvider, GoogleFeedProvider, BloombergFeedProvider, BitcoinAverageFeedProvider,\
+from .feed_providers import FeedPrice, FeedSet, BterFeedProvider, Btc38FeedProvider,\
+    PoloniexFeedProvider, BitcoinAverageFeedProvider,\
     BitfinexFeedProvider, BitstampFeedProvider, YunbiFeedProvider,\
     CoinCapFeedProvider, CoinMarketCapFeedProvider, BittrexFeedProvider,\
-    CurrencyLayerFeedProvider, FixerFeedProvider,\
+    CurrencyLayerFeedProvider, FixerFeedProvider, QuandlFeedProvider, UpholdFeedProvider,\
+    LivecoinFeedProvider, AEXFeedProvider, ZBFeedProvider,\
     ALL_FEED_PROVIDERS
 from collections import deque, defaultdict
 from contextlib import suppress
@@ -72,7 +73,7 @@ def load_feeds():
     cfg = core.config['monitoring']['feeds']
     history_len = int(cfg['median_time_span'] / cfg['check_time_interval'])
     price_history = {cur: deque(maxlen=history_len) for cur in BIT_ASSETS}
-    visible_feeds = cfg.get('visible_feeds', DEFAULT_VISIBLE_FEEDS)
+    visible_feeds = cfg['bts'].get('visible_feeds', DEFAULT_VISIBLE_FEEDS)
     feed_control = BitSharesFeedControl(cfg=cfg, visible_feeds=visible_feeds)
 
 
@@ -192,9 +193,11 @@ def get_bit20_feed(node, usd_price):
             market_params = json.loads(f['memo'][len('MARKET :: '):])
             log.debug('Got market params for bit20: {}'.format(market_params))
             # FIXME: this affects the global config object
-            cfg['asset_params']['BTWTY'] = {'maintenance_collateral_ratio': market_params['MCR'],
-                                            'maximum_short_squeeze_ratio': market_params['MSSR'],
-                                            'core_exchange_factor': cfg['asset_params']['default']['core_exchange_factor']}
+            params = cfg['bts']['asset_params']
+            params['BTWTY'] = {'maintenance_collateral_ratio': market_params['MCR'],
+                               'maximum_short_squeeze_ratio': market_params['MSSR'],
+                               'core_exchange_factor': params.get('BTWTY', {}).get('core_exchange_factor',
+                                                                                   params['default']['core_exchange_factor'])}
             break
     else:
         log.debug('Did not find any custom market parameters in the last {} messages '
@@ -282,11 +285,12 @@ def get_hertz_feed(reference_timestamp, current_timestamp, period_days, phase_da
     return hertz_value
 
 def get_feed_prices(node):
-    provider_names = {p.lower() for p in cfg['feed_providers']}
-    active_providers = set()
-    for name, provider in ALL_FEED_PROVIDERS.items():
-        if name in provider_names:
-            active_providers.add(provider())
+    active_providers = defaultdict(set)
+    for chain in ['bts', 'steem']:
+        provider_names = {p.lower() for p in cfg[chain]['feed_providers']}
+        for name, provider in ALL_FEED_PROVIDERS.items():
+            if name in provider_names:
+                active_providers[chain].add(provider())
 
     # get currency rates from yahoo
     # do not include:
@@ -301,14 +305,12 @@ def get_feed_prices(node):
     #     log.warning(e)
 
     currency_layer_prices = []
-    CURRENCYLAYER_ACTIVE = True
-    if CURRENCYLAYER_ACTIVE:
-        try:
-            currency_layer = CurrencyLayerFeedProvider()
-            currency_layer_prices = currency_layer.get(YAHOO_ASSETS | {'CNY'}, 'USD')
+    try:
+        currency_layer = CurrencyLayerFeedProvider()
+        currency_layer_prices = currency_layer.get(tuple(YAHOO_ASSETS | {'CNY'}), 'USD')
 
-        except Exception as e:
-            log.debug('Could not get feeds from CurrencyLayer: {}'.format(e))
+    except Exception as e:
+        log.debug('Could not get feeds from CurrencyLayer: {}'.format(e))
 
     fixer_prices = []
     try:
@@ -317,8 +319,25 @@ def get_feed_prices(node):
         log.warning('Could not get feeds from fixer.io: {}'.format(e))
 
 
+    # get gold and silver
+    gold_silver_prices = []
 
-    base_usd_price = FeedSet(yahoo_prices + currency_layer_prices + fixer_prices)
+    quandl = QuandlFeedProvider()
+    try:
+        gold_silver_prices += [quandl.get('GOLD', 'USD'),
+                               quandl.get('SILVER', 'USD')]
+    except Exception as e:
+        log.debug('Could not get gold/silver feeds from Quandl')
+
+    # uphold = UpholdFeedProvider()
+    # try:
+    #     gold_silver_prices += [uphold.get('GOLD', 'USD'),
+    #                            uphold.get('SILVER', 'USD')]
+    # except Exception as e:
+    #     log.debug('Could not get gold/silver feeds from Uphold')
+
+
+    base_usd_price = FeedSet(yahoo_prices + currency_layer_prices + fixer_prices + gold_silver_prices)
 
     # 1- get the BitShares price in major markets: BTC, USD and CNY
     btcavg = core.config['credentials']['bitcoinaverage']
@@ -328,32 +347,38 @@ def get_feed_prices(node):
     bitstamp = BitstampFeedProvider()
     bittrex = BittrexFeedProvider()
     btc38 = Btc38FeedProvider()
-    aex = AexFeedProvider()
     bter = BterFeedProvider()
     cmc = CoinMarketCapFeedProvider()
     coincap = CoinCapFeedProvider()
     poloniex = PoloniexFeedProvider()
     yunbi = YunbiFeedProvider()
+    livecoin = LivecoinFeedProvider()
+    aex = AEXFeedProvider()
+    zb = ZBFeedProvider()
 
     # 1.1- first get the bts/btc valuation
-    providers_bts_btc = {aex, poloniex, bittrex} & active_providers
+    providers_bts_btc = {poloniex, bittrex, livecoin, aex, zb} & active_providers['bts']
     if not providers_bts_btc:
         log.warning('No feed providers for BTS/BTC feed price')
     all_feeds = get_multi_feeds('get', [('BTS', 'BTC')], providers_bts_btc)
 
     feeds_bts_btc = all_feeds.filter('BTS', 'BTC')
+
+    if not feeds_bts_btc:
+        # in last resort, just get our data from coinmarketcap and coincap
+        log.info('getting bts/btc directly from coinmarketcap, no other sources available')
+        feeds_bts_btc = FeedSet([cmc.get('BTS', 'BTC'),
+                                 coincap.get('BTS', 'BTC')])
+
     if not feeds_bts_btc:
         raise core.NoFeedData('Could not get any BTS/BTC feeds')
 
     btc_price = feeds_bts_btc.price()
 
     # 1.2- get the btc/usd (bitcoin avg)
-    try:
-        feeds_btc_usd = FeedSet([bitcoinavg.get('BTC', 'USD')])
-    except Exception:
-        # fall back on Bitfinex, Bitstamp if BitcoinAverage is down or not configured - TODO: add Kraken, others? CMC
-        log.debug('Could not get BTC/USD using BitcoinAverage, trying other sources')
-        feeds_btc_usd = get_multi_feeds('get', [('BTC', 'USD')], {bitfinex, bitstamp})
+    feeds_btc_usd = get_multi_feeds('get', [('BTC', 'USD')], {bitcoinavg, cmc, bitfinex, bitstamp} & active_providers['bts']) # coincap seems to be off sometimes, do not use it
+    if not feeds_btc_usd:
+        raise core.NoFeedData('Could not get any BTC/USD feeds')
 
     btc_usd = feeds_btc_usd.price()
 
@@ -362,7 +387,7 @@ def get_feed_prices(node):
     # 1.3- get the bts/cny valuation directly from cny markets. Going from bts/btc and
     #      btc/cny to bts/cny introduces a slight difference (2-3%) that doesn't exist on
     #      the actual chinese markets
-    providers_bts_cny = {bter, btc38, yunbi} & active_providers
+    providers_bts_cny = {bter, btc38, yunbi} & active_providers['bts']
 
     # TODO: should go at the beginning: submit all fetching tasks to an event loop / threaded executor,
     # compute valuations once we have everything
@@ -397,7 +422,11 @@ def get_feed_prices(node):
 
     # 2- now get the BitShares price in all other required currencies
     for asset in YAHOO_ASSETS:
-        feeds[asset] = usd_price / base_usd_price.price(asset)
+        try:
+            feeds[asset] = usd_price / base_usd_price.price(asset)
+        except Exception:
+            log.warning('no feed price for asset {}'.format(asset))
+
 
     # 2.1- RUBLE is used temporarily by RUDEX instead of bitRUB (black swan)
     #      see https://bitsharestalk.org/index.php/topic,24004.0/all.html
@@ -413,7 +442,7 @@ def get_feed_prices(node):
     gridcoin = get_multi_feeds('get', [('GRIDCOIN', 'BTC')], {poloniex, bittrex})
     feeds['GRIDCOIN'] = btc_price / gridcoin.price(stddev_tolerance=0.1)
 
-    steem_btc = get_multi_feeds('get', [('STEEM', 'BTC')], {poloniex, bittrex})
+    steem_btc = get_multi_feeds('get', [('STEEM', 'BTC')], {poloniex, bittrex} & active_providers['steem'])
     steem_usd = steem_btc.price() * btc_usd
     feeds['STEEM'] = steem_usd
 
@@ -474,8 +503,8 @@ def get_fraction(price, asset_precision, base_precision, N=6):
 
 
 def get_price_for_publishing(node, median_feeds, asset, price):
-    c = dict(cfg['asset_params']['default'])  # make a copy, we don't want to update the default value
-    c.update(cfg['asset_params'].get(asset) or {})
+    c = dict(cfg['bts']['asset_params']['default'])  # make a copy, we don't want to update the default value
+    c.update(cfg['bts']['asset_params'].get(asset) or {})
     asset_id = node.asset_data(asset)['id']
     asset_precision = node.asset_data(asset)['precision']
 
@@ -529,8 +558,8 @@ def get_price_for_publishing(node, median_feeds, asset, price):
 
 
 def get_disabled_assets():
-    cfg_enabled = set(cfg.get('enabled_assets', []))
-    cfg_disabled = set(cfg.get('disabled_assets', []))
+    cfg_enabled = set(cfg['bts'].get('enabled_assets', []))
+    cfg_disabled = set(cfg['bts'].get('disabled_assets', []))
     for asset in cfg_enabled:
         if asset in cfg_disabled:
             log.warning("Asset {} is both in 'enabled_assets' and 'disabled_assets'. Disabling it".format(asset))
@@ -562,16 +591,16 @@ class BitSharesFeedControl(object):
 
         # FIXME: deprecate self.feed_period
         try:
-            self.feed_period = int(cfg['publish_time_interval'] / cfg['check_time_interval'])
+            self.feed_period = int(cfg['bts']['publish_time_interval'] / cfg['check_time_interval'])
         except KeyError:
             self.feed_period = None
 
-        self.check_time_interval = pendulum.interval(seconds=cfg.get('check_time_interval', 300))
+        self.check_time_interval = pendulum.interval(seconds=cfg.get('check_time_interval', 600))
         self.publish_time_interval = None
-        if 'publish_time_interval' in cfg:
-            self.publish_time_interval = pendulum.interval(seconds=cfg['publish_time_interval'])
+        if 'publish_time_interval' in cfg['bts']:
+            self.publish_time_interval = pendulum.interval(seconds=cfg['bts']['publish_time_interval'])
 
-        self.feed_slot = cfg.get('publish_time_slot', None)
+        self.feed_slot = cfg['bts'].get('publish_time_slot', None)
         if self.feed_slot is not None:
             self.feed_slot = int(self.feed_slot)
 
@@ -582,7 +611,7 @@ class BitSharesFeedControl(object):
         display_feeds = []
         for c in set(self.visible_feeds) | set(feeds.keys()):
             if c not in feeds:
-                log.warning('No feed price available for {}, cannot display it'.format(c))
+                log.debug('No feed price available for {}, cannot display it'.format(c))
             else:
                 display_feeds.append(c)
         display_feeds = list(sorted(feeds))
@@ -613,7 +642,7 @@ class BitSharesFeedControl(object):
             return True
 
         if self.feed_period is not None and self.nfeed_checked % self.feed_period == 0:
-            log.debug('Should publish because time interval has passed: {} seconds'.format(cfg['publish_time_interval']))
+            log.debug('Should publish because time interval has passed: {} seconds'.format(cfg['bts']['publish_time_interval']))
             return True
 
 
@@ -708,7 +737,7 @@ def check_feeds(nodes):
                         log.warning('Cannot publish feeds for steem witness %s: wallet is locked' % node.name)
                         continue
 
-                    ratio = cfg['steem_dollar_adjustment']
+                    ratio = cfg['steem']['steem_dollar_adjustment']
                     price_obj = {'base': '{:.3f} SBD'.format(price),
                                  'quote': '{:.3f} STEEM'.format(1/ratio)}
                     log.info('Node {}:{} publishing feed price for steem: {:.3f} SBD (real: {:.3f} adjusted by {:.2f})'
