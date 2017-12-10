@@ -70,6 +70,27 @@ class AttributeDict(dict):
         self.__dict__ = self
 
 
+class CaseInsensitiveAttributeDict(dict):
+    def __init__(self, *args, **kwargs):
+        super(CaseInsensitiveAttributeDict, self).__init__(*args, **kwargs)
+        lcase = {(k.lower(), v) for k, v in self.items()}
+        self.clear()
+        self.update(lcase)
+        self.__dict__ = self
+
+    def __getitem__(self, item):
+        return super().__getitem__(item.lower())
+
+    def __setitem__(self, item, value):
+        return super().__setitem__(item.lower(), value)
+
+    def __getattr__(self, item):
+        return self[item.lower()]
+
+    def __setattr__(self, key, value):
+        return super().__setattr__(key, value)
+
+
 config = None
 db = {}
 DB_VERSION = 1
@@ -536,11 +557,13 @@ class hashabledict(dict):
 
 
 def make_hashable(obj):
-    if isinstance(obj, abc.MutableSequence):
+    if isinstance(obj, (str, bytes)):
+        return obj
+    elif isinstance(obj, abc.Sequence):
         return tuple(make_hashable(x) for x in obj)
-    elif isinstance(obj, abc.MutableMapping):
+    elif isinstance(obj, abc.Mapping):
         return tuple((k, make_hashable(v)) for k, v in sorted(obj.items()))
-    elif isinstance(obj, abc.MutableSet):
+    elif isinstance(obj, abc.Set):
         return frozenset(make_hashable(x) for x in obj)
     else:
         try:
@@ -588,12 +611,20 @@ def list_valid_plugins(plugin_type):
             plugin_name = basename[:-3]  # remove trailing '.py'
             # potential candidate, check for required functions
             plugin_members = dir(get_plugin(plugin_type, plugin_name))
+            is_valid = True
             for func in base_module.REQUIRED_FUNCTIONS:
                 if func not in plugin_members:
                     log.warning('Function {} is not defined for potential plugin {}:{}, not importing it'
                                 .format(func, plugin_type, plugin_name))
+                    is_valid = False
                     break
-            else:
+            for var in getattr(base_module, 'REQUIRED_VARS', []):  # REQUIRED_VARS is optional
+                if var not in plugin_members:
+                    log.warning('Variable {} is not defined for potential plugin {}:{}, not importing it'
+                                .format(var, plugin_type, plugin_name))
+                    is_valid = False
+                    break
+            if is_valid:
                 result.append(plugin_name)
     return result
 
@@ -601,6 +632,13 @@ def list_valid_plugins(plugin_type):
 def get_plugin(plugin_type, plugin_name):
     plugin = importlib.import_module('{}.{}'.format(plugin_type, plugin_name))
     return plugin
+
+
+def get_plugin_dict(plugin_type):
+    result = CaseInsensitiveAttributeDict()
+    for plugin_name in list_valid_plugins(plugin_type):
+        result[plugin_name] = get_plugin(plugin_type, plugin_name)
+    return result
 
 
 def replace_in_file(filename, old, new, **kwargs):
