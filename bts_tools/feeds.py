@@ -41,7 +41,7 @@ FIAT_ASSETS = {'USD', 'CNY', 'EUR', 'GBP', 'CAD', 'CHF', 'HKD', 'MXN', 'RUB', 'S
 
 BASE_ASSETS = {'BTC', 'GOLD', 'SILVER'} | FIAT_ASSETS
 
-OTHER_ASSETS = {'ALTCAP', 'GRIDCOIN', 'STEEM',
+OTHER_ASSETS = {'ALTCAP', 'GRIDCOIN', 'STEEM', 'GOLOS',
                 'BTWTY', 'RUBLE', 'HERO', 'HERTZ'}
 
 BIT_ASSETS = BASE_ASSETS | OTHER_ASSETS
@@ -224,6 +224,7 @@ def get_bit20_feed(node, usd_price):
 
     except Exception as e:
         log.warning('Could not get bit20 assets feed from CoinMarketCap: {}'.format(e))
+        cmc_missing_assets = [asset for asset, qty in bit20['data']]
 
     try:
         coincap_assets = providers.CoinCap.get_all()
@@ -240,6 +241,7 @@ def get_bit20_feed(node, usd_price):
 
     except Exception as e:
         log.warning('Could not get bit20 assets feed from CoinCap: {}'.format(e))
+        coincap_missing_assets = [asset for asset, qty in bit20['data']]
 
 
     bit20_feeds = FeedSet()
@@ -255,10 +257,10 @@ def get_bit20_feed(node, usd_price):
     if not coincap_missing_assets:
         bit20_feeds.append(cc_feed)
     if not bit20_feeds:
-        log.warning('All providers have at least one asset not listed:')
-        log.warning('- CoinMarketCap: {}'.format(cmc_missing_assets))
-        log.warning('- CoinCap: {}'.format(coincap_missing_assets))
-        bit20_feeds = FeedSet([cmc_feed, cc_feed])
+        log.warning('No provider could provider feed for all assets:')
+        log.warning('- CoinMarketCap missing: {}'.format(cmc_missing_assets))
+        log.warning('- CoinCap missing: {}'.format(coincap_missing_assets))
+        raise core.NoFeedData('Could not get any BTWTY feed')
 
     bit20_value = bit20_feeds.price(stddev_tolerance=0.02)
     log.debug('Total value of bit20 asset: ${}'.format(bit20_value))
@@ -422,18 +424,25 @@ def get_feed_prices(node):
     steem_usd = steem_btc.price() * btc_usd
     feeds['STEEM'] = steem_usd
 
+    golos_btc = get_multi_feeds('get', [('GOLOS', 'BTC')], active_providers_steem({providers.Bittrex, providers.Livecoin}))
+    golos_bts = btc_price / golos_btc.price()
+    feeds['GOLOS'] = golos_bts
+
     # 5- Bit20 asset
     if 'BTWTY' not in get_disabled_assets():
-        bit20 = get_bit20_feed(node, usd_price)
-        if bit20 is not None:
-            feeds['BTWTY'] = bit20
+        try:
+            bit20 = get_bit20_feed(node, usd_price)
+            if bit20 is not None:
+                feeds['BTWTY'] = bit20
+        except core.NoFeedData as e:
+            log.warning(e)
 
     # 6- HERTZ asset
     if 'HERTZ' not in get_disabled_assets():
         hertz_reference_timestamp = "2015-10-13T14:12:24+00:00" # Bitshares 2.0 genesis block timestamp
         hertz_current_timestamp = pendulum.now().timestamp() # Current timestamp for reference within the hertz script
-        hertz_amplitude = 1/3 # 33.33..% fluctuation
-        hertz_period_days = 28 # 30.43 days converted to an UNIX timestamp // TODO: Potentially change this value to 28
+        hertz_amplitude = 0.14 # 14% fluctuation (1% per day)
+        hertz_period_days = 28 # 28 days
         hertz_phase_days = 0.908056 # Time offset from genesis till the first wednesday, to set wednesday as the primary Hz day.
         hertz_reference_asset_price = usd_price
         
